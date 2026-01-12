@@ -3,4 +3,4 @@ pandas
 folium
 streamlit-folium
 streamlit-js-eval
-google-ortools
+ortools
