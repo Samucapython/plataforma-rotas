@@ -21,9 +21,10 @@ if 'entregas_feitas' not in st.session_state: st.session_state['entregas_feitas'
 
 def obter_rota_ruas(coords_list):
     try:
+        # overview=full garante que a linha siga cada curva da rua com precisão
         locs = ";".join([f"{lon},{lat}" for lat, lon in coords_list])
-        url = f"http://router.project-osrm.org/route/v1/driving/{locs}?overview=full&geometries=geojson"
-        r = requests.get(url, timeout=10)
+        url = f"http://router.project-osrm.org/route/v1/driving/{locs}?overview=full&geometries=geojson&continue_straight=true"
+        r = requests.get(url, timeout=15)
         if r.status_code == 200:
             geom = r.json()['routes'][0]['geometry']['coordinates']
             return [[p[1], p[0]] for p in geom]
@@ -50,8 +51,12 @@ if not st.session_state['logado']:
 
 st.set_page_config(page_title="Rota Pro", layout="wide")
 
+# Título Dinâmico e Auto-refresh
 if st.session_state['df_otimizado'] is not None:
+    st.title("📦 Entrega em Andamento")
     st_autorefresh(interval=30000, key="datarefresh")
+else:
+    st.title("🚚 Minha Rota Inteligente")
 
 st.sidebar.write(f"Motorista: {st.session_state['usuario']}")
 if st.sidebar.button("Sair"):
@@ -59,8 +64,6 @@ if st.sidebar.button("Sair"):
     st.session_state['df_otimizado'] = None
     st.session_state['entregas_feitas'] = set()
     st.rerun()
-
-st.title("🚚 Minha Rota Inteligente")
 
 loc = get_geolocation()
 
@@ -98,31 +101,29 @@ def otimizar_rota(df, lat_i, lon_i):
         return [i-1 for i in ordem if i > 0]
     return None
 
-arquivo = st.file_uploader("Suba seu arquivo", type=['csv', 'xlsx'])
+# 3. INTERFACE DE ARQUIVO (SÓ APARECE SE NÃO HOUVER ROTA ATIVA)
+if st.session_state['df_otimizado'] is None:
+    arquivo = st.file_uploader("Suba seu arquivo", type=['csv', 'xlsx'])
+    if arquivo:
+        if st.button("CALCULAR MELHOR CAMINHO"):
+            try:
+                df_raw = pd.read_csv(arquivo) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo)
+                df = df_raw.groupby(['Latitude', 'Longitude'], as_index=False).agg({
+                    'Destination Address': 'first',
+                    'Bairro': 'first',
+                    'City': 'first',
+                    'Sequence': 'first',
+                    'Stop': 'count'
+                })
+                indices_rota = otimizar_rota(df, lat_origem, lon_origem)
+                if indices_rota:
+                    st.session_state['df_otimizado'] = df.iloc[indices_rota].copy()
+                    st.session_state['entregas_feitas'] = set()
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Erro no arquivo: {e}")
 
-if arquivo:
-    if st.button("CALCULAR MELHOR CAMINHO"):
-        try:
-            df_raw = pd.read_csv(arquivo) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo)
-            
-            # --- LÓGICA DE AGRUPAMENTO POR ENDEREÇO ---
-            # Agrupamos por Latitude e Longitude para garantir que o ponto no mapa seja único
-            df = df_raw.groupby(['Latitude', 'Longitude'], as_index=False).agg({
-                'Destination Address': 'first',
-                'Bairro': 'first',
-                'City': 'first',
-                'Sequence': 'first',
-                'Stop': 'count' # Conta quantos pedidos (linhas) existem para esse local
-            })
-            
-            indices_rota = otimizar_rota(df, lat_origem, lon_origem)
-            if indices_rota:
-                st.session_state['df_otimizado'] = df.iloc[indices_rota].copy()
-                st.session_state['entregas_feitas'] = set()
-                st.rerun()
-        except Exception as e:
-            st.error(f"Erro no arquivo: {e}")
-
+# 4. EXIBIÇÃO DO MAPA E CARD DINÂMICO
 if st.session_state['df_otimizado'] is not None:
     df_res = st.session_state['df_otimizado']
     
@@ -133,50 +134,58 @@ if st.session_state['df_otimizado'] is not None:
                 st.session_state['entregas_feitas'].add(i)
                 st.toast(f"✅ Parada {i+1} concluída!", icon='📍')
 
+    # MAPA COM CONTROLES DE INTERAÇÃO E ROTAÇÃO
     m = folium.Map(location=[lat_origem, lon_origem], zoom_start=16)
+    
+    # Rota Precisa (Azul)
     pontos_rota = [[lat_origem, lon_origem]] + df_res[['Latitude', 'Longitude']].values.tolist()
-    folium.PolyLine(obter_rota_ruas(pontos_rota), color="#1a73e8", weight=4, opacity=0.7).add_to(m)
+    folium.PolyLine(obter_rota_ruas(pontos_rota), color="#1a73e8", weight=6, opacity=0.8).add_to(m)
     
-    folium.CircleMarker([lat_origem, lon_origem], radius=5, color='red', fill=True, fill_color='red').add_to(m)
+    # Marcador do Motorista
+    folium.CircleMarker([lat_origem, lon_origem], radius=6, color='red', fill=True, z_index=1000).add_to(m)
     
     for i, row in enumerate(df_res.itertuples()):
-        cor_status = "#28a745" if i in st.session_state['entregas_feitas'] else "#1a73e8"
-        texto_clique = f"Parada {i+1}: {getattr(row, 'Destination Address', 'Endereço não listado')}"
+        cor = "#28a745" if i in st.session_state['entregas_feitas'] else "#1a73e8"
+        endereco_total = getattr(row, '_3', 'Endereço não listado') # '_3' é a coluna Destination Address
         
-        # Reduzimos o tamanho aqui: width e height de 26px para 22px
-        icone = folium.DivIcon(html=f"""
-            <div style="background-color:{cor_status}; color:white; border-radius:50%; width:22px; height:22px; 
-            display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:10px; border:1px solid white;">
-                {i+1}
-            </div>""")
-        folium.Marker([row.Latitude, row.Longitude], icon=icone, popup=folium.Popup(texto_clique, max_width=250)).add_to(m)
+        icone = folium.DivIcon(html=f"""<div style="background-color:{cor}; color:white; border-radius:50%; width:22px; height:22px; 
+            display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:10px; border:1px solid white;
+            box-shadow: 0px 0px 5px rgba(0,0,0,0.3);">{i+1}</div>""")
+        
+        folium.Marker(
+            [row.Latitude, row.Longitude], 
+            icon=icone, 
+            popup=folium.Popup(f"<b>Parada {i+1}</b><br>{endereco_total}", max_width=300),
+            z_index_offset=500
+        ).add_to(m)
     
-    st_folium(m, width="100%", height=450, key="mapa_v11", returned_objects=[])
-    
+    st_folium(m, width="100%", height=400, key="mapa_v12")
+
+    # 5. CARD DETALHADO (PRÓXIMA PARADA)
     st.markdown("---")
-    proxima = None
-    for i, row in enumerate(df_res.itertuples()):
-        if i not in st.session_state['entregas_feitas']:
-            proxima = (i+1, row)
-            break
-            
+    proxima = next(( (i+1, r) for i, r in enumerate(df_res.itertuples()) if i not in st.session_state['entregas_feitas']), None)
+    
     if proxima:
         idx, dados = proxima
-        with st.container():
-            st.markdown(f"### 📍 PRÓXIMA PARADA: {idx}")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                st.metric("Ordem de Entrega", f"#{idx}")
-            with c2:
-                # Agora 'Stop' mostra o total de pacotes agrupados para este endereço
-                st.metric("Volumes/Pacotes", f"{getattr(dados, 'Stop', '1')} un")
-            
-            st.info(f"🏠 **Endereço:** {getattr(dados, 'Destination Address', 'Endereço não listado')}\n\n"
-                    f"🏘️ **Bairro:** {getattr(dados, 'Bairro', '-')} | {getattr(dados, 'City', '-')}")
-            
-            g_maps = f"https://www.google.com/maps/dir/?api=1&destination={dados.Latitude},{dados.Longitude}"
-            st.link_button("🚀 INICIAR NAVEGAÇÃO (GOOGLE MAPS)", g_maps, use_container_width=True)
+        st.subheader(f"📍 Próxima: Parada {idx}")
+        c1, c2 = st.columns(2)
+        c1.metric("Ordem de Entrega", f"#{idx}")
+        c2.metric("Volumes/Pacotes", f"{dados.Stop} un")
+        
+        st.warning(f"🏠 **Endereço Completo:**\n{getattr(dados, 'Destination Address', 'Endereço não listado')}")
+        st.write(f"🏘️ **Bairro:** {dados.Bairro} | **Cidade:** {dados.City}")
+        
+        # Link Google Maps modo navegação direta
+        g_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat_origem},{lon_origem}&destination={dados.Latitude},{dados.Longitude}&travelmode=driving"
+        st.link_button("🚀 INICIAR NAVEGAÇÃO NO GOOGLE MAPS", g_maps, use_container_width=True)
+        
+        if st.button("Resetar Rota (Limpar Arquivo)"):
+            st.session_state['df_otimizado'] = None
+            st.rerun()
     else:
         st.balloons()
-        st.success("🎉 Rota concluída com sucesso!")
+        st.success("🎉 Rota Finalizada com Sucesso!")
+        if st.button("Carregar Nova Rota"):
+            st.session_state['df_otimizado'] = None
+            st.session_state['entregas_feitas'] = set()
+            st.rerun()
