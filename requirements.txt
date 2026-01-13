@@ -5,3 +5,4 @@ streamlit-folium
 streamlit-js-eval
 ortools
 openpyxl
+requests

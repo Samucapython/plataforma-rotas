@@ -5,6 +5,7 @@ from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 from math import radians, cos, sin, asin, sqrt
+import requests # Necessário para o traçado das ruas
 
 # 1. SEGURANÇA E MEMÓRIA
 MOTORISTAS_AUTORIZADOS = {
@@ -16,7 +17,21 @@ MOTORISTAS_AUTORIZADOS = {
 if 'logado' not in st.session_state: st.session_state['logado'] = False
 if 'df_otimizado' not in st.session_state: st.session_state['df_otimizado'] = None
 
-# Funções de Login
+# Função para traçar rota pelas ruas (OSRM - Grátis)
+def obter_rota_ruas(coords_list):
+    try:
+        # Formata as coordenadas para a API (Longitude,Latitude)
+        locs = ";".join([f"{lon},{lat}" for lat, lon in coords_list])
+        url = f"http://router.project-osrm.org/route/v1/driving/{locs}?overview=full&geometries=geojson"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            # Retorna a lista de pontos da geometria da rua
+            geom = r.json()['routes'][0]['geometry']['coordinates']
+            return [[p[1], p[0]] for p in geom] # Inverte para Lat,Lon
+    except:
+        pass
+    return coords_list # Caso falhe, usa a linha reta como plano B
+
 def login():
     st.title("🔐 Login - Otimizador de Rotas")
     with st.form("login_form"):
@@ -42,21 +57,21 @@ if st.sidebar.button("Sair"):
     st.session_state['df_otimizado'] = None
     st.rerun()
 
-st.title("🚚 Minha Rota Otimizada")
+st.title("🚚 Minha Rota Inteligente")
 
 # Captura GPS
 loc = get_geolocation()
 if not loc:
-    st.warning("Ative o GPS para começar.")
+    st.warning("Aguardando sinal do GPS... Verifique se a localização está ativa no navegador.")
     st.stop()
 
 lat_origem = loc['coords']['latitude']
 lon_origem = loc['coords']['longitude']
 
 # Upload
-arquivo = st.file_uploader("Suba seu arquivo (Excel ou CSV)", type=['csv', 'xlsx'])
+arquivo = st.file_uploader("Suba seu arquivo do Samuel (Excel ou CSV)", type=['csv', 'xlsx'])
 
-# Lógica Matemática
+# Funções Matemáticas
 def calcular_distancia(p1, p2):
     lat1, lon1 = p1; lat2, lon2 = p2
     lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
@@ -94,21 +109,54 @@ if arquivo:
         except Exception as e:
             st.error(f"Erro no arquivo: {e}")
 
-# Exibição do Resultado
+# Exibição do Resultado Estético
 if st.session_state['df_otimizado'] is not None:
     df_res = st.session_state['df_otimizado']
     
-    # Mapa
+    # Criar o Mapa
     m = folium.Map(location=[lat_origem, lon_origem], zoom_start=14)
-    trajeto = [[lat_origem, lon_origem]] + df_res[['Latitude', 'Longitude']].values.tolist()
-    folium.PolyLine(trajeto, color="#007bff", weight=5).add_to(m)
+    
+    # Pontos para a rota real
+    pontos_para_api = [[lat_origem, lon_origem]] + df_res[['Latitude', 'Longitude']].values.tolist()
+    
+    # Desenhar rota pelas ruas
+    with st.spinner("Desenhando trajeto pelas ruas..."):
+        caminho_ruas = obter_rota_ruas(pontos_para_api)
+        folium.PolyLine(caminho_ruas, color="#1a73e8", weight=6, opacity=0.8).add_to(m)
+    
+    # Marcador da posição atual (Motorista)
     folium.Marker([lat_origem, lon_origem], tooltip="Você", icon=folium.Icon(color='red', icon='car', prefix='fa')).add_to(m)
     
+    # Marcadores Numerados (1, 2, 3...)
     for i, row in enumerate(df_res.itertuples()):
-        folium.Marker([row.Latitude, row.Longitude], tooltip=f"Parada {i+1}").add_to(m)
+        # Criando um ícone customizado com o número
+        icone_numero = folium.DivIcon(html=f"""
+            <div style="
+                background-color: #1a73e8; 
+                color: white; 
+                border-radius: 50%; 
+                width: 30px; 
+                height: 30px; 
+                display: flex; 
+                align-items: center; 
+                justify-content: center; 
+                font-weight: bold; 
+                font-size: 14px;
+                border: 2px solid white;
+                box-shadow: 0px 0px 5px rgba(0,0,0,0.5);
+            ">
+                {i+1}
+            </div>
+        """)
+        
+        folium.Marker(
+            [row.Latitude, row.Longitude],
+            icon=icone_numero,
+            popup=f"Parada {i+1}: {getattr(row, 'Destination Address', 'Endereço')}"
+        ).add_to(m)
     
-    # O CADEADO (Não impede o movimento dos dedos, apenas salva o estado)
-    st_folium(m, width="100%", height=500, key="mapa_dinamico")
+    # Exibe o mapa com o "cadeado" de estado
+    st_folium(m, width="100%", height=550, key="mapa_profissional")
     
-    st.subheader("📋 Lista de Sequência")
+    st.subheader("📋 Ordem de Entregas")
     st.dataframe(df_res[['Destination Address', 'Bairro', 'City']])
