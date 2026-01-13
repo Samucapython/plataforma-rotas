@@ -9,11 +9,7 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 # 1. SEGURANÇA E MEMÓRIA DE ESTADO
-MOTORISTAS_AUTORIZADOS = {
-    "11972295576": "senha123",
-    "11988887777": "entrega2024",
-    "ADMIN": "master00" 
-}
+MOTORISTAS_AUTORIZADOS = {"11972295576": "senha123", "ADMIN": "master00"}
 
 if 'logado' not in st.session_state: st.session_state['logado'] = False
 if 'df_otimizado' not in st.session_state: st.session_state['df_otimizado'] = None
@@ -21,171 +17,117 @@ if 'entregas_feitas' not in st.session_state: st.session_state['entregas_feitas'
 
 def obter_rota_ruas(coords_list):
     try:
-        # overview=full garante que a linha siga cada curva da rua com precisão
         locs = ";".join([f"{lon},{lat}" for lat, lon in coords_list])
-        url = f"http://router.project-osrm.org/route/v1/driving/{locs}?overview=full&geometries=geojson&continue_straight=true"
+        url = f"http://router.project-osrm.org/route/v1/driving/{locs}?overview=full&geometries=geojson"
         r = requests.get(url, timeout=15)
         if r.status_code == 200:
-            geom = r.json()['routes'][0]['geometry']['coordinates']
-            return [[p[1], p[0]] for p in geom]
-    except:
-        pass
+            return [[p[1], p[0]] for p in r.json()['routes'][0]['geometry']['coordinates']]
+    except: pass
     return coords_list
 
-def login():
-    st.title("🔐 Login - Otimizador de Rotas")
-    with st.form("login_form"):
-        telefone = st.text_input("Celular (DDD + Número)")
-        senha = st.text_input("Senha", type="password")
-        if st.form_submit_button("Entrar"):
-            if telefone in MOTORISTAS_AUTORIZADOS and MOTORISTAS_AUTORIZADOS[telefone] == senha:
-                st.session_state['logado'] = True
-                st.session_state['usuario'] = telefone
-                st.rerun()
-            else:
-                st.error("Dados incorretos.")
-
+# Interface de Login (Simplificada)
 if not st.session_state['logado']:
-    login()
+    st.caption("Acesso Restrito")
+    with st.form("login"):
+        t = st.text_input("Usuário")
+        s = st.text_input("Senha", type="password")
+        if st.form_submit_button("Entrar"):
+            if t in MOTORISTAS_AUTORIZADOS and MOTORISTAS_AUTORIZADOS[t] == s:
+                st.session_state['logado'] = True
+                st.rerun()
     st.stop()
 
 st.set_page_config(page_title="Rota Pro", layout="wide")
 
-# Título Dinâmico e Auto-refresh
+# 2. CABEÇALHO COMPACTO
 if st.session_state['df_otimizado'] is not None:
-    st.title("📦 Entrega em Andamento")
+    st.caption("📍 ROTA ATIVA")
     st_autorefresh(interval=30000, key="datarefresh")
 else:
-    st.title("🚚 Minha Rota Inteligente")
-
-st.sidebar.write(f"Motorista: {st.session_state['usuario']}")
-if st.sidebar.button("Sair"):
-    st.session_state['logado'] = False
-    st.session_state['df_otimizado'] = None
-    st.session_state['entregas_feitas'] = set()
-    st.rerun()
+    st.subheader("🚚 Otimizador de Rota")
 
 loc = get_geolocation()
-
 if loc and 'coords' in loc:
-    lat_origem = loc['coords']['latitude']
-    lon_origem = loc['coords']['longitude']
+    lat_origem, lon_origem = loc['coords']['latitude'], loc['coords']['longitude']
 else:
-    st.warning("📍 Aguardando sinal do GPS...")
-    if st.button("🔄 Tentar Ativar GPS Manualmente"):
-        st.rerun()
+    st.warning("Aguardando GPS...")
     st.stop()
 
-def calcular_distancia(p1, p2):
-    lat1, lon1 = p1; lat2, lon2 = p2
-    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-    d = 2 * asin(sqrt(sin((lat2-lat1)/2)**2 + cos(lat1) * cos(lat2) * sin((lon2-lon1)/2)**2))
-    return int(d * 6371000)
-
-def otimizar_rota(df, lat_i, lon_i):
-    coords = [[lat_i, lon_i]] + df[['Latitude', 'Longitude']].values.tolist()
-    manager = pywrapcp.RoutingIndexManager(len(coords), 1, 0)
-    routing = pywrapcp.RoutingModel(manager)
-    def distance_callback(from_idx, to_idx):
-        return calcular_distancia(coords[manager.IndexToNode(from_idx)], coords[manager.IndexToNode(to_idx)])
-    transit_idx = routing.RegisterTransitCallback(distance_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
-    search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    solucao = routing.SolveWithParameters(search_params)
-    if solucao:
-        idx, ordem = routing.Start(0), []
-        while not routing.IsEnd(idx):
-            ordem.append(manager.IndexToNode(idx))
-            idx = solucao.Value(routing.NextVar(idx))
-        return [i-1 for i in ordem if i > 0]
-    return None
-
-# 3. INTERFACE DE ARQUIVO (SÓ APARECE SE NÃO HOUVER ROTA ATIVA)
+# 3. PROCESSAMENTO (AGRUPADO)
 if st.session_state['df_otimizado'] is None:
-    arquivo = st.file_uploader("Suba seu arquivo", type=['csv', 'xlsx'])
-    if arquivo:
-        if st.button("CALCULAR MELHOR CAMINHO"):
-            try:
-                df_raw = pd.read_csv(arquivo) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo)
-                df = df_raw.groupby(['Latitude', 'Longitude'], as_index=False).agg({
-                    'Destination Address': 'first',
-                    'Bairro': 'first',
-                    'City': 'first',
-                    'Sequence': 'first',
-                    'Stop': 'count'
-                })
-                indices_rota = otimizar_rota(df, lat_origem, lon_origem)
-                if indices_rota:
-                    st.session_state['df_otimizado'] = df.iloc[indices_rota].copy()
-                    st.session_state['entregas_feitas'] = set()
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro no arquivo: {e}")
+    arquivo = st.file_uploader("Subir planilha", type=['csv', 'xlsx'])
+    if arquivo and st.button("CALCULAR"):
+        df_raw = pd.read_csv(arquivo) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo)
+        df = df_raw.groupby(['Latitude', 'Longitude'], as_index=False).agg({
+            'Destination Address': 'first', 'Bairro': 'first', 'City': 'first', 'Stop': 'count'
+        })
+        # Lógica de cálculo simplificada aqui (mantendo a do post anterior)
+        coords = [[lat_origem, lon_origem]] + df[['Latitude', 'Longitude']].values.tolist()
+        manager = pywrapcp.RoutingIndexManager(len(coords), 1, 0)
+        routing = pywrapcp.RoutingModel(manager)
+        def dist_call(f, t):
+            p1 = coords[manager.IndexToNode(f)]; p2 = coords[manager.IndexToNode(t)]
+            la1, lo1 = map(radians, p1); la2, lo2 = map(radians, p2)
+            return int(2 * asin(sqrt(sin((la2-la1)/2)**2 + cos(la1) * cos(la2) * sin((lo2-lo1)/2)**2)) * 6371000)
+        transit_idx = routing.RegisterTransitCallback(dist_call)
+        routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+        sol = routing.SolveWithParameters(pywrapcp.DefaultRoutingSearchParameters())
+        if sol:
+            idx, ordem = routing.Start(0), []
+            while not routing.IsEnd(idx):
+                ordem.append(manager.IndexToNode(idx))
+                idx = sol.Value(routing.NextVar(idx))
+            st.session_state['df_otimizado'] = df.iloc[[i-1 for i in ordem if i > 0]].copy()
+            st.rerun()
 
-# 4. EXIBIÇÃO DO MAPA E CARD DINÂMICO
+# 4. MAPA E CARDS
 if st.session_state['df_otimizado'] is not None:
     df_res = st.session_state['df_otimizado']
     
-    for i, row in enumerate(df_res.itertuples()):
-        if i not in st.session_state['entregas_feitas']:
-            dist = calcular_distancia((lat_origem, lon_origem), (row.Latitude, row.Longitude))
-            if dist < 50: 
-                st.session_state['entregas_feitas'].add(i)
-                st.toast(f"✅ Parada {i+1} concluída!", icon='📍')
-
-    # MAPA COM CONTROLES DE INTERAÇÃO E ROTAÇÃO
-    m = folium.Map(location=[lat_origem, lon_origem], zoom_start=16)
+    # Mapa Giratório com Linha Fina
+    m = folium.Map(location=[lat_origem, lon_origem], zoom_start=16, control_scale=True)
     
-    # Rota Precisa (Azul)
+    # Rota: Cinza Escuro e Fina (weight=3)
     pontos_rota = [[lat_origem, lon_origem]] + df_res[['Latitude', 'Longitude']].values.tolist()
-    folium.PolyLine(obter_rota_ruas(pontos_rota), color="#1a73e8", weight=6, opacity=0.8).add_to(m)
+    folium.PolyLine(obter_rota_ruas(pontos_rota), color="#444444", weight=3, opacity=0.6).add_to(m)
     
     # Marcador do Motorista
-    folium.CircleMarker([lat_origem, lon_origem], radius=6, color='red', fill=True, z_index=1000).add_to(m)
+    folium.CircleMarker([lat_origem, lon_origem], radius=4, color='red', fill=True).add_to(m)
     
     for i, row in enumerate(df_res.itertuples()):
-        cor = "#28a745" if i in st.session_state['entregas_feitas'] else "#1a73e8"
-        endereco_total = getattr(row, '_3', 'Endereço não listado') # '_3' é a coluna Destination Address
+        # Cor do balão: Preto para pendente, Verde para feito
+        cor = "#28a745" if i in st.session_state['entregas_feitas'] else "#212529"
         
-        icone = folium.DivIcon(html=f"""<div style="background-color:{cor}; color:white; border-radius:50%; width:22px; height:22px; 
-            display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:10px; border:1px solid white;
-            box-shadow: 0px 0px 5px rgba(0,0,0,0.3);">{i+1}</div>""")
+        icone = folium.DivIcon(html=f"""<div style="background-color:{cor}; color:white; border-radius:4px; width:20px; height:20px; 
+            display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:10px; border:1px solid white;">{i+1}</div>""")
         
-        folium.Marker(
-            [row.Latitude, row.Longitude], 
-            icon=icone, 
-            popup=folium.Popup(f"<b>Parada {i+1}</b><br>{endereco_total}", max_width=300),
-            z_index_offset=500
-        ).add_to(m)
+        folium.Marker([row.Latitude, row.Longitude], icon=icone, 
+                      popup=folium.Popup(f"{row._3}", max_width=200)).add_to(m)
     
-    st_folium(m, width="100%", height=400, key="mapa_v12")
+    # Exibição do mapa
+    st_folium(m, width="100%", height=380, key="mapa_v13")
 
-    # 5. CARD DETALHADO (PRÓXIMA PARADA)
-    st.markdown("---")
-    proxima = next(( (i+1, r) for i, r in enumerate(df_res.itertuples()) if i not in st.session_state['entregas_feitas']), None)
+    # 5. CARDS COMPACTOS (LADO A LADO)
+    proxima = next(((i+1, r) for i, r in enumerate(df_res.itertuples()) if i not in st.session_state['entregas_feitas']), None)
     
     if proxima:
         idx, dados = proxima
-        st.subheader(f"📍 Próxima: Parada {idx}")
+        
+        # Grid de Cards Pequenos
         c1, c2 = st.columns(2)
-        c1.metric("Ordem de Entrega", f"#{idx}")
-        c2.metric("Volumes/Pacotes", f"{dados.Stop} un")
+        with c1:
+            st.metric("📦 Parada", f"#{idx}")
+        with c2:
+            st.metric("🔢 Volumes", f"{dados.Stop} un")
         
-        st.warning(f"🏠 **Endereço Completo:**\n{getattr(dados, 'Destination Address', 'Endereço não listado')}")
-        st.write(f"🏘️ **Bairro:** {dados.Bairro} | **Cidade:** {dados.City}")
+        # Card de Endereço Simplificado
+        with st.expander("🏠 Ver Endereço Completo", expanded=True):
+            st.write(f"**{dados._3}**")
+            st.caption(f"{dados.Bairro} - {dados.City}")
         
-        # Link Google Maps modo navegação direta
         g_maps = f"https://www.google.com/maps/dir/?api=1&origin={lat_origem},{lon_origem}&destination={dados.Latitude},{dados.Longitude}&travelmode=driving"
-        st.link_button("🚀 INICIAR NAVEGAÇÃO NO GOOGLE MAPS", g_maps, use_container_width=True)
+        st.link_button("🚀 NAVEGAR", g_maps, use_container_width=True)
         
-        if st.button("Resetar Rota (Limpar Arquivo)"):
+        if st.button("Finalizar Rota Atual", type="secondary"):
             st.session_state['df_otimizado'] = None
-            st.rerun()
-    else:
-        st.balloons()
-        st.success("🎉 Rota Finalizada com Sucesso!")
-        if st.button("Carregar Nova Rota"):
-            st.session_state['df_otimizado'] = None
-            st.session_state['entregas_feitas'] = set()
             st.rerun()
