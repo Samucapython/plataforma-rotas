@@ -6,3 +6,4 @@ streamlit-js-eval
 ortools
 openpyxl
 requests
+streamlit-autorefresh
