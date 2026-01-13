@@ -6,9 +6,9 @@ from streamlit_js_eval import get_geolocation
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 from math import radians, cos, sin, asin, sqrt
 import requests
-from streamlit_autorefresh import st_autorefresh # Nova biblioteca para auto-refresh
+from streamlit_autorefresh import st_autorefresh
 
-# 1. SEGURANÇA E MEMÓRIA
+# 1. SEGURANÇA E MEMÓRIA DE ESTADO
 MOTORISTAS_AUTORIZADOS = {
     "11972295576": "senha123",
     "11988887777": "entrega2024",
@@ -17,8 +17,9 @@ MOTORISTAS_AUTORIZADOS = {
 
 if 'logado' not in st.session_state: st.session_state['logado'] = False
 if 'df_otimizado' not in st.session_state: st.session_state['df_otimizado'] = None
+if 'entregas_feitas' not in st.session_state: st.session_state['entregas_feitas'] = set()
 
-# Função para traçar rota pelas ruas (OSRM - Grátis)
+# Função para traçar rota pelas ruas (OSRM)
 def obter_rota_ruas(coords_list):
     try:
         locs = ";".join([f"{lon},{lat}" for lat, lon in coords_list])
@@ -48,10 +49,10 @@ if not st.session_state['logado']:
     login()
     st.stop()
 
-# 2. CONFIGURAÇÃO APÓS LOGIN
+# 2. CONFIGURAÇÃO DA PÁGINA E AUTO-REFRESH
 st.set_page_config(page_title="Rota Pro", layout="wide")
 
-# ATUALIZAÇÃO AUTOMÁTICA: Faz o app conferir o GPS a cada 30 segundos
+# Atualiza a posição e checa o Geofencing a cada 30 segundos
 if st.session_state['df_otimizado'] is not None:
     st_autorefresh(interval=30000, key="datarefresh")
 
@@ -59,11 +60,12 @@ st.sidebar.write(f"Motorista: {st.session_state['usuario']}")
 if st.sidebar.button("Sair"):
     st.session_state['logado'] = False
     st.session_state['df_otimizado'] = None
+    st.session_state['entregas_feitas'] = set()
     st.rerun()
 
 st.title("🚚 Minha Rota Inteligente")
 
-# Captura GPS
+# 3. CAPTURA GPS
 loc = get_geolocation()
 if not loc:
     st.warning("📍 Aguardando sinal do GPS... Certifique-se que a localização está ativa.")
@@ -74,10 +76,7 @@ if not loc:
 lat_origem = loc['coords']['latitude']
 lon_origem = loc['coords']['longitude']
 
-# Upload
-arquivo = st.file_uploader("Suba seu arquivo do Samuel (Excel ou CSV)", type=['csv', 'xlsx'])
-
-# Funções Matemáticas
+# 4. FUNÇÕES DE CÁLCULO
 def calcular_distancia(p1, p2):
     lat1, lon1 = p1; lat2, lon2 = p2
     lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
@@ -86,8 +85,7 @@ def calcular_distancia(p1, p2):
 
 def otimizar_rota(df, lat_i, lon_i):
     coords = [[lat_i, lon_i]] + df[['Latitude', 'Longitude']].values.tolist()
-    n = len(coords)
-    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    manager = pywrapcp.RoutingIndexManager(len(coords), 1, 0)
     routing = pywrapcp.RoutingModel(manager)
     def distance_callback(from_idx, to_idx):
         return calcular_distancia(coords[manager.IndexToNode(from_idx)], coords[manager.IndexToNode(to_idx)])
@@ -104,7 +102,9 @@ def otimizar_rota(df, lat_i, lon_i):
         return [i-1 for i in ordem if i > 0]
     return None
 
-# Processamento
+# 5. PROCESSAMENTO DE ARQUIVO
+arquivo = st.file_uploader("Suba seu arquivo (Excel ou CSV)", type=['csv', 'xlsx'])
+
 if arquivo:
     if st.button("CALCULAR MELHOR CAMINHO"):
         try:
@@ -112,42 +112,62 @@ if arquivo:
             indices_rota = otimizar_rota(df, lat_origem, lon_origem)
             if indices_rota:
                 st.session_state['df_otimizado'] = df.iloc[indices_rota].copy()
+                st.session_state['entregas_feitas'] = set()
                 st.rerun()
         except Exception as e:
             st.error(f"Erro no arquivo: {e}")
 
-# Exibição do Resultado Estético
+# 6. EXIBIÇÃO E LÓGICA AUTOMÁTICA
 if st.session_state['df_otimizado'] is not None:
     df_res = st.session_state['df_otimizado']
     
-    # O mapa agora foca na posição ATUAL do motorista (lat_origem atualiza no refresh)
-    m = folium.Map(location=[lat_origem, lon_origem], zoom_start=15)
-    
-    pontos_para_api = [[lat_origem, lon_origem]] + df_res[['Latitude', 'Longitude']].values.tolist()
-    
-    # Desenhar rota pelas ruas
-    caminho_ruas = obter_rota_ruas(pontos_para_api)
-    folium.PolyLine(caminho_ruas, color="#1a73e8", weight=6, opacity=0.8).add_to(m)
-    
-    # Marcador da posição ATUAL em tempo real
-    folium.Marker(
-        [lat_origem, lon_origem], 
-        tooltip="Sua posição atual", 
-        icon=folium.Icon(color='red', icon='car', prefix='fa')
-    ).add_to(m)
-    
-    # Marcadores Numerados
+    # LÓGICA DE GEOFENCING (Baixa Automática)
     for i, row in enumerate(df_res.itertuples()):
-        icone_numero = folium.DivIcon(html=f"""
-            <div style="background-color: #1a73e8; color: white; border-radius: 50%; width: 30px; height: 30px; 
-                display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;
-                border: 2px solid white; box-shadow: 0px 0px 5px rgba(0,0,0,0.5);">
+        if i not in st.session_state['entregas_feitas']:
+            dist = calcular_distancia((lat_origem, lon_origem), (row.Latitude, row.Longitude))
+            if dist < 50: # Raio de 50 metros
+                st.session_state['entregas_feitas'].add(i)
+                st.toast(f"✅ Parada {i+1} concluída!", icon='📍')
+
+    # MONTAGEM DO MAPA
+    m = folium.Map(location=[lat_origem, lon_origem], zoom_start=16)
+    pontos_rota = [[lat_origem, lon_origem]] + df_res[['Latitude', 'Longitude']].values.tolist()
+    folium.PolyLine(obter_rota_ruas(pontos_rota), color="#1a73e8", weight=4, opacity=0.7).add_to(m)
+    
+    # Motorista (Ponto Vermelho)
+    folium.CircleMarker([lat_origem, lon_origem], radius=6, color='red', fill=True, fill_color='red').add_to(m)
+    
+    # Marcadores Numerados Pequenos
+    for i, row in enumerate(df_res.itertuples()):
+        cor_status = "#28a745" if i in st.session_state['entregas_feitas'] else "#1a73e8"
+        icone = folium.DivIcon(html=f"""
+            <div style="background-color:{cor_status}; color:white; border-radius:50%; width:22px; height:22px; 
+            display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:10px; border:1px solid white;">
                 {i+1}
-            </div>
-        """)
-        folium.Marker([row.Latitude, row.Longitude], icon=icone_numero).add_to(m)
+            </div>""")
+        folium.Marker([row.Latitude, row.Longitude], icon=icone).add_to(m)
     
-    st_folium(m, width="100%", height=550, key="mapa_v6")
+    st_folium(m, width="100%", height=450, key="mapa_final_v9")
     
-    st.subheader("📋 Lista de Próximas Entregas")
-    st.table(df_res[['Destination Address', 'Bairro']])
+    # 7. CARD DINÂMICO DE PRÓXIMA ENTREGA
+    st.markdown("---")
+    proxima = None
+    for i, row in enumerate(df_res.itertuples()):
+        if i not in st.session_state['entregas_feitas']:
+            proxima = (i+1, row)
+            break
+            
+    if proxima:
+        idx, dados = proxima
+        with st.container():
+            st.success(f"📍 **PRÓXIMA PARADA: {idx}**")
+            # Ajuste os nomes das colunas conforme seu arquivo real
+            st.subheader(f"{getattr(dados, 'Destination Address', 'Endereço não encontrado')}")
+            st.write(f"🏘️ Bairro: {getattr(dados, 'Bairro', '-')} | Cidade: {getattr(dados, 'City', '-')}")
+            
+            # Botão Google Maps para Navegação
+            g_maps = f"https://www.google.com/maps/search/?api=1&query={dados.Latitude},{dados.Longitude}"
+            st.link_button("🗺️ ABRIR NAVEGAÇÃO (GOOGLE MAPS)", g_maps)
+    else:
+        st.balloons()
+        st.success("🎉 Rota concluída com sucesso!")
