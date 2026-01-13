@@ -65,16 +65,17 @@ if st.sidebar.button("Sair"):
 
 st.title("🚚 Minha Rota Inteligente")
 
-# 3. CAPTURA GPS
+# 3. CAPTURA GPS COM VERIFICAÇÃO DE SEGURANÇA (CORREÇÃO DO ERRO NO CELULAR)
 loc = get_geolocation()
-if not loc:
-    st.warning("📍 Aguardando sinal do GPS... Certifique-se que a localização está ativa.")
+
+if loc and 'coords' in loc:
+    lat_origem = loc['coords']['latitude']
+    lon_origem = loc['coords']['longitude']
+else:
+    st.warning("📍 Aguardando sinal do GPS... Certifique-se de que a localização está ativa e que você permitiu o acesso no navegador.")
     if st.button("🔄 Tentar Ativar GPS Manualmente"):
         st.rerun()
     st.stop()
-
-lat_origem = loc['coords']['latitude']
-lon_origem = loc['coords']['longitude']
 
 # 4. FUNÇÕES DE CÁLCULO
 def calcular_distancia(p1, p2):
@@ -161,12 +162,11 @@ if st.session_state['df_otimizado'] is not None:
         idx, dados = proxima
         with st.container():
             st.success(f"📍 **PRÓXIMA PARADA: {idx}**")
-            # Ajuste os nomes das colunas conforme seu arquivo real
             st.subheader(f"{getattr(dados, 'Destination Address', 'Endereço não encontrado')}")
             st.write(f"🏘️ Bairro: {getattr(dados, 'Bairro', '-')} | Cidade: {getattr(dados, 'City', '-')}")
             
             # Botão Google Maps para Navegação
-            g_maps = f"https://www.google.com/maps/search/?api=1&query={dados.Latitude},{dados.Longitude}"
+            g_maps = f"https://www.google.com/maps/dir/?api=1&destination={dados.Latitude},{dados.Longitude}"
             st.link_button("🗺️ ABRIR NAVEGAÇÃO (GOOGLE MAPS)", g_maps)
     else:
         st.balloons()
